@@ -8,7 +8,7 @@ const int MPU_ADDR = 0x68;
 
 float gY, gX, gZ, gYdrift, gXdrift, gZdrift;
 float aY, aX, aZ, aTotal, temperature;
-unsigned long loop_timer, zero_timer, last_blink;
+unsigned long loop_timer, zero_timer, timeOfLastAltHold;
 
 float gyroPitchEstimate, gyroRollEstimate, gyroYawEstimate;
 float accPitchEstimate, accRollEstimate, accYawEstimate;
@@ -18,7 +18,7 @@ float pitchEstimate, rollEstimate, yawEstimate;
 /* RC Receiver Variables */
 
 int receiver_ch1, receiver_ch2, receiver_ch3, receiver_ch4, receiver_ch5, receiver_ch6;
-unsigned long timer_channel_1, timer_channel_2, timer_channel_3, timer_channel_4, timer_channel_5, timer_channel_6, esc_timer, esc_loop_timer;
+unsigned long timer_esc1, timer_esc2, timer_esc3, timer_esc4, timer_esc5, timer_esc6, timer_gimbalRoll, timer_gimbalPitch, esc_timer, esc_loop_timer;
 
 byte last_channel_1, last_channel_2, last_channel_3, last_channel_4, last_channel_5, last_channel_6;
 unsigned long timer_1, timer_2, timer_3, timer_4, timer_5, timer_6, current_time;
@@ -58,7 +58,6 @@ float previousDistance = 0;
 
 unsigned long timeSinceLastBeep;
 int counter = 0;
-int delayIndex[4] = {300, 150, 100, 150};
 
 
 /* Altitude hold variables */
@@ -75,11 +74,13 @@ boolean readyForAltPID = false;
 /* Gimbal variables */
 
 Servo servoPitch, servoRoll;
-int gimbalPitch, gimbalRoll;
+int gimbalPitch, gimbalRoll, old_gimbalPitch, old_gimbalRoll;
+int servoUpdateTick = 0;
 
 
 
 void setup() {
+
   tone(A1, 493);
   delay(150);
   tone(A1, 343);
@@ -87,8 +88,8 @@ void setup() {
   noTone(A1);
   delay(50);
   tone(A1, 343, 150);
-  DDRD |= B11110000;                                 //Set ports 4, 5, 6 and 7 to output
-  DDRC |= B00001000;                                 //Set analog pin 2 to output
+  DDRD |= B11111100;                                 //Set ports 4, 5, 6 and 7 to output
+  DDRC |= B00001001;                                 //Set analog pins 2 and 0 to output
   
   PCICR |= (1 << PCIE0);                             // set PCIE0 to enable PCMSK0 scan
   PCICR |= (1 << PCIE1);                             // set PCIE1 to enable PCMSK1 scan
@@ -114,9 +115,9 @@ void setup() {
   KIy = .015;
   KDy = 29;
 
-  KPt = 15;
+  KPt = 3;
   KIt = 0.000001;
-  KDt = 15;
+  KDt = 4;
 
   gYdrift = 0;
   gXdrift = 0;
@@ -133,8 +134,7 @@ void setup() {
       delay(250);
   }
   Serial.begin(9600);   
-  //delay(250);
-  Serial.println("ArgonFC V 0.4.2");
+  Serial.println("ArgonFC V 0.4.3");
   //Activate the MPU-6050
   Wire.beginTransmission(0x68);                                        //Start communicating with the MPU-6050
   Wire.write(0x6B);                                                    //Send turn-on command
@@ -207,10 +207,9 @@ void setup() {
   pitchEstimate = 0;
   rollEstimate = 0;
   yawEstimate = 0;
-  servoPitch.attach(3);
-  servoRoll.attach(2);
+  
   timeSinceLastBeep = millis();
-  zero_timer = micros;
+  zero_timer = micros();
   
 }
 
@@ -241,19 +240,16 @@ void loop() {
 
     //Sonar Ping
     if(!waitingForEcho){
-        if(!sendingPulse){
           pulseStartTime = micros();
           PORTC |= B00001000;
-          sendingPulse = true;
-        }else if(sendingPulse && (pulseStartTime + 12 < micros())){
-          PORTC &= B00000000;
-          sendingPulse = false;
+          delayMicroseconds(12);
+          PORTC &= B11110111;
           waitingForEcho = true;
-        }
     }
 
     if(millis()-timeOfLastInterrupt > 20){
       distance = -1;
+      waitingForEcho = false;
     }else{
       previousDistance = distance;
       distance = ((double)durationOfEcho / 2) / 29.1;
@@ -274,8 +270,8 @@ void loop() {
     gyroRollEstimate -= gyroPitchEstimate * sin(gZ * (convert_to_degrees * (3.142/180))); 
 
     aTotal = sqrt((aX*aX)+(aY*aY)+(aZ*aZ));            
-    accPitchEstimate = asin((float)aY/aTotal)* 57.2958; 
-    accRollEstimate = asin((float)aX/aTotal)* -57.2958; 
+    accPitchEstimate = asin((float)aY/aTotal) * 57.2958; 
+    accRollEstimate = asin((float)aX/aTotal) * -57.2958; 
 
     if(centerGyro){ //This is the first loop, and the quadcopter may not be on level ground. So we need to use the accelerometer to center the gyroscope.
 
@@ -314,21 +310,23 @@ void loop() {
       throttleSetpoint = throttle;
       altitudeSetpoint = distance;
       altitudeHoldInit = true;
-      tone(A1, 500);
+      PORTC |= B00000001;
+      timeOfLastAltHold = micros();
     }
     if(altitudeHoldInit && altitudeHold){ //Initialized and user still wants alt hold
       if(throttleSetpoint - throttle > 40 || throttleSetpoint - throttle < -40 || distance < 0){ //User moved throttle or sonar was unable to get solid reading, abort 
         hardAbort = true;
         outputThrottle = 0;
-        noTone(A1);
+        PORTC &= B11111110;
       }else{
-        calculate_altitude_pid();
+        if(readyForAltPID)
+          calculate_altitude_pid();
+        readyForAltPID = false;
       }
     }else if(altitudeHoldInit && !altitudeHold){ //Haven't initialized but alt hold still on - disable!
       altitudeHoldInit = false;
       outputThrottle = 0;
-      noTone(A1);
-
+      PORTC &= B11111110;
     }
 
     
@@ -350,10 +348,16 @@ void loop() {
     //ESC 3 = pin 6 (FRONT LEFT)
     //ESC 4 = pin 7 (BACK RIGHT)
     
+
+    
     esc1 = throttle - outputPitch + outputRoll + outputYaw + outputThrottle;
     esc2 = throttle + outputPitch - outputRoll + outputYaw + outputThrottle;
     esc3 = throttle + outputPitch + outputRoll - outputYaw + outputThrottle;
     esc4 = throttle - outputPitch - outputRoll - outputYaw + outputThrottle; 
+    old_gimbalPitch = gimbalPitch;
+    old_gimbalRoll = gimbalRoll;
+    gimbalPitch = 1350 - pitchEstimate * 10;
+    gimbalRoll = 1400 + rollEstimate * 10;
 
   
     
@@ -363,46 +367,45 @@ void loop() {
       esc3 = 1000;
       esc4 = 1000;
     }
+
     while(zero_timer + 4000 > micros()){
       
     }
-    
     zero_timer = micros();
 
-    
-    PORTD |= B11110000;
-    
-    timer_channel_1 = esc1 + zero_timer;                       //Determine how long each port should be set to HIGH for. (Add the correction (in units of PWM) to the zero timer)
-    timer_channel_2 = esc2 + zero_timer;   
-    timer_channel_3 = esc3 + zero_timer;   
-    timer_channel_4 = esc4 + zero_timer;     
-    
-    
-    while(PORTD >= 16){                                        //Execute the loop until digital port 4 til 7 is low.
-      
-       esc_loop_timer = micros();                               //Check the current time.
-
-       
-       if(timer_channel_1 <= esc_loop_timer)PORTD &= B11101111; //port 4 is set low.
-       if(timer_channel_2 <= esc_loop_timer)PORTD &= B11011111; //port 5 is set low.
-       if(timer_channel_3 <= esc_loop_timer)PORTD &= B10111111; //port 6 is set low.
-       if(timer_channel_4 <= esc_loop_timer)PORTD &= B01111111; //port 7 is set low.
-
-    
+    if(servoUpdateTick == 8){ //Digital servos can only handle so many PWM signals per second. If we do one every 8 loops thats every 32 ms - roughly 31hz. Google says 40hz is upper bound, so we gud.
+      if(old_gimbalRoll - gimbalRoll != 0){
+        PORTD |= B11110100;
+        gimbalRoll = old_gimbalRoll;
+      }
+      if(old_gimbalPitch - gimbalPitch != 0){
+        PORTD |= B11111000;
+        gimbalPitch = old_gimbalPitch;
+      }
+      servoUpdateTick = 0;
+    }else{
+      PORTD |= B11110000;
+      servoUpdateTick++;
     }
-    //Gimbal
-    if(95 + pitchEstimate > 158) servoPitch.write(158);
-    else if(95 + pitchEstimate < 48) servoPitch.write(48);
-    else servoPitch.write(80 - pitchEstimate);
-    
-    servoRoll.write(85+rollEstimate);
-    
+    timer_esc1 = esc1 + zero_timer;                       //Determine how long each port should be set to HIGH for. (Add the correction (in units of PWM) to the zero timer)
+    timer_esc2 = esc2 + zero_timer;   
+    timer_esc3 = esc3 + zero_timer;   
+    timer_esc4 = esc4 + zero_timer;
+    timer_gimbalRoll = gimbalRoll + zero_timer;
+    timer_gimbalPitch = gimbalPitch + zero_timer;
 
-      
+    
+    while(PORTD >= 4){                                        //Execute the loop until digital port 4 til 7 is low.
+       esc_loop_timer = micros();                               //Check the current time.
+       if(timer_esc1 <= esc_loop_timer) PORTD &= B11101111; //port 4 is set low.
+       if(timer_esc2 <= esc_loop_timer) PORTD &= B11011111; //port 5 is set low.
+       if(timer_esc3 <= esc_loop_timer) PORTD &= B10111111; //port 6 is set low.
+       if(timer_esc4 <= esc_loop_timer) PORTD &= B01111111; //port 7 is set low.
+       if(timer_gimbalRoll <= esc_loop_timer) PORTD &= B11111011;
+       if(timer_gimbalPitch <= esc_loop_timer) PORTD &= B11110111;
+    }
+    
     convert_to_degrees = 1/(1000/(millis()-loop_timer)*65.5);
-
-  
- 
 }
 
 
@@ -425,15 +428,19 @@ void read_MPU6050(){
 }
 
 void calculate_altitude_pid(){
+  int dt = micros() - timeOfLastAltHold;
+  timeOfLastAltHold = micros();
   altitudeError = altitudeSetpoint - distance;
 
-  integralT += altitudeError;
-  derivativeT = (altitudeError - prevAltitudeError);
+  integralT += altitudeError * dt;
+  derivativeT = (altitudeError - prevAltitudeError)/dt;
   prevAltitudeError = altitudeError;
   outputThrottle = KPt * altitudeError + KIt * integralT + KDt * derivativeT;
 
   if(outputThrottle > 150) outputThrottle = 150;
   if(outputThrottle < -150) outputThrottle = -150;
+
+  
   
 }
 
