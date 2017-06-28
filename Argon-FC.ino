@@ -69,7 +69,9 @@ float throttleSetpoint;
 float lastThrottle;
 float altitudeSetpoint;
 float altitudeError;
+boolean newPingAvailable = false;
 boolean readyForAltPID = false;
+int badSonarPingCounter = 0;
 
 /* Gimbal variables */
 
@@ -80,14 +82,14 @@ int servoUpdateTick = 0;
 
 
 void setup() {
-
+/*
   tone(A1, 493);
   delay(150);
   tone(A1, 343);
   delay(150);
   noTone(A1);
   delay(50);
-  tone(A1, 343, 150);
+  tone(A1, 343, 150);*/
   DDRD |= B11111100;                                 //Set ports 4, 5, 6 and 7 to output
   DDRC |= B00001001;                                 //Set analog pins 2 and 0 to output
   
@@ -158,7 +160,7 @@ void setup() {
   Serial.println("Gyro setup done.");
   
   Serial.print("Calibrating gyro");
-  tone(A1, 131, 200);
+//  tone(A1, 131, 200);
 
   int accuracy = 200;
   for(int i = 0; i < accuracy; i++){
@@ -174,7 +176,7 @@ void setup() {
   gYdrift /= accuracy;
   gXdrift /= accuracy;
   gZdrift /= accuracy;
-  tone(A1, 165, 200);
+//  tone(A1, 165, 200);
   int start = 0;
   for(int i = 0; i < 50; i++){
     PORTD |= B11110000;                              //Set ports 4, 5, 6 and 7 to HIGH.
@@ -183,7 +185,7 @@ void setup() {
     delay(4);
                                   
   }
-  tone(A1, 196, 200);
+//  tone(A1, 196, 200);
 
   while(receiver_ch3 < 800 || receiver_ch3 > 1040 || receiver_ch4 > 1040){
     start ++;                                        
@@ -195,7 +197,7 @@ void setup() {
       digitalWrite(13, !digitalRead(13));            
       start = 0;   
       Serial.println("Waiting for receiver signal...");  
-      tone(A1, 240, 100);
+  //    tone(A1, 240, 100);
     }
   }
   //delay(250);
@@ -207,7 +209,7 @@ void setup() {
   pitchEstimate = 0;
   rollEstimate = 0;
   yawEstimate = 0;
-  
+  durationOfEcho = 0;
   timeSinceLastBeep = millis();
   zero_timer = micros();
   
@@ -245,17 +247,22 @@ void loop() {
           delayMicroseconds(12);
           PORTC &= B11110111;
           waitingForEcho = true;
+    }else if(millis()-timeOfLastInterrupt > 20){
+      badSonarPingCounter++;
+      waitingForEcho = false;
+    }
+    if(badSonarPingCounter > 10){
+      PORTC |= B00000001;
     }
 
-    if(millis()-timeOfLastInterrupt > 20){
-      distance = -1;
-      waitingForEcho = false;
-    }else{
+    if(newPingAvailable){
       previousDistance = distance;
-      distance = ((double)durationOfEcho / 2) / 29.1;
-      distance = (distance + previousDistance)/2;
+      distance = ((double)durationOfEcho / 2) / 29.1 - 8.6;
+      badSonarPingCounter--;
+      Serial.println(distance);
+      newPingAvailable = false;
     }
-    
+
     //Gyro calculations
     read_MPU6050();
 
@@ -321,7 +328,6 @@ void loop() {
       }else{
         if(readyForAltPID)
           calculate_altitude_pid();
-        readyForAltPID = false;
       }
     }else if(altitudeHoldInit && !altitudeHold){ //Haven't initialized but alt hold still on - disable!
       altitudeHoldInit = false;
@@ -404,7 +410,9 @@ void loop() {
        if(timer_gimbalRoll <= esc_loop_timer) PORTD &= B11111011;
        if(timer_gimbalPitch <= esc_loop_timer) PORTD &= B11110111;
     }
+
     
+
     convert_to_degrees = 1/(1000/(millis()-loop_timer)*65.5);
 }
 
@@ -577,6 +585,7 @@ ISR(PCINT1_vect){
     durationOfEcho = micros() - echoStartTime;
     waitingForEcho = false;
     previousInterruptWasHigh = false;
+    newPingAvailable = true;
     readyForAltPID = true;
   }
 
